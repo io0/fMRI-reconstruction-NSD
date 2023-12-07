@@ -24,7 +24,31 @@ from pytorch_msssim import ssim
 import utils
 from models import Voxel2StableDiffusionModel
 from convnext import ConvnextXL
+import h5py
+import wandb
 
+# Replace 'yourfile.hdf5' with the path to your .hdf5 file
+with h5py.File('betas_1cm_subj01.hdf5', 'r') as hdf:
+    # Load the entire data into memory as a numpy array
+    downsampled_betas = np.array(hdf['betas'])
+    # downsampled_betas =  torch.from_numpy(hdf['betas'][:])
+# load coco 73k indices
+indices_path = "COCO_73k_subj_indices.hdf5"
+hdf5_file = h5py.File(indices_path, "r")
+indices = hdf5_file[f"subj01"][:]
+valid_indices = indices[:len(downsampled_betas)]
+
+def get_trials(trial):
+    same_image_trials = []
+    for trial_el in trial:
+        same_im = np.where(valid_indices == valid_indices[trial_el[0]])[0]
+        arr = same_im
+        if len(same_im) == 1:
+            arr = np.array([same_im[0], same_im[0], same_im[0]])
+        elif len(same_im) == 2:
+            arr = np.array([same_im[0], same_im[1], same_im[1]])
+        same_image_trials.append(arr)
+    return same_image_trials
 def set_ddp():
     import torch.distributed as dist
     env_dict = {
@@ -72,7 +96,24 @@ autoenc.requires_grad_(False)
 autoenc.eval()
 
 # # Configurations
-model_name = "autoencoder"
+downsampled = 0
+if not downsampled:
+    model_name = "autoencoder_large"
+else:
+    model_name = "autoencoder_128_3xdataset"
+
+h=4096
+# start a new wandb run to track this script
+wandb.init(
+    # set the wandb project where this run will be logged
+    project=model_name,
+    
+    # track hyperparameters and run metadata
+    config={
+    "hidden_units": h,
+    "input_dim": 363 if downsampled else 15724
+    }
+)
 modality = "image" # ("image", "text")
 image_var = 'images' if modality=='image' else None  # trial
 clamp_embs = False # clamp embeddings to (-1.5, 1.5)
@@ -161,10 +202,11 @@ n_cache_recs = 0
 
 # # Prep models and data loaders
 if local_rank == 0: print('Creating voxel2sd...')
-
 in_dims = {'01': 15724, '02': 14278, '05': 13039, '07':12682}
+if downsampled:
+    in_dims = {'01': 363, '02': 14278, '05': 13039, '07':12682}
 if voxel_dims == 1: # 1D data
-    voxel2sd = Voxel2StableDiffusionModel(use_cont=use_cont, in_dim=in_dims[subj_id], ups_mode=ups_mode)
+    voxel2sd = Voxel2StableDiffusionModel(use_cont=use_cont, in_dim=in_dims[subj_id], h=h, ups_mode=ups_mode)
 elif voxel_dims == 3: # 3D data
     raise NotImplementedError()
     
@@ -188,8 +230,11 @@ meta_url = f"/fsx/proj-fmri/shared/natural-scenes-dataset/webdataset_avg_split/m
 if local_rank == 0: print('Prepping train and validation dataloaders...')
 num_train = 8559 + 300
 num_val = 982
-
-train_dl, val_dl, num_train, num_val = utils.get_dataloaders(
+if downsampled:
+    to_tuple = ["images", "trial"]
+else:
+    to_tuple = ["voxels", "images", "trial"]
+train_dl, val_dl, num_train, num_val, _ = utils.get_dataloaders(
     batch_size,
     num_devices=num_devices,
     num_workers=num_workers,
@@ -202,7 +247,8 @@ train_dl, val_dl, num_train, num_val = utils.get_dataloaders(
     voxels_key='nsdgeneral.npy',
     local_rank=local_rank,
     num_train=num_train,
-    num_val=num_val
+    num_val=num_val,
+    # to_tuple=to_tuple
 )
 
 no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
@@ -277,18 +323,35 @@ mean = torch.tensor([0.485, 0.456, 0.406]).to(device).reshape(1,3,1,1)
 std = torch.tensor([0.228, 0.224, 0.225]).to(device).reshape(1,3,1,1)
 epoch = 0
 
-if ckpt_path is not None:
-    print("\n---resuming from ckpt_path---\n",ckpt_path)
+# if ckpt_path is not None:
+#     print("\n---resuming from ckpt_path---\n",ckpt_path)
+#     checkpoint = torch.load(ckpt_path, map_location=device)
+#     epoch = checkpoint['epoch']+1
+#     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])        
+#     voxel2sd.module.load_state_dict(checkpoint['model_state_dict'])
+#     global_batch_size = batch_size * num_devices
+#     total_steps_done = epoch*(num_train//global_batch_size)
+#     for _ in range(total_steps_done):
+#         lr_scheduler.step()
+#     del checkpoint
+#     torch.cuda.empty_cache()
+# Optionally resume from checkpoint #
+if resume_from_ckpt:
+    print("\n---resuming from ckpt_path---\n", ckpt_path)
     checkpoint = torch.load(ckpt_path, map_location=device)
     epoch = checkpoint['epoch']+1
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])        
-    voxel2sd.module.load_state_dict(checkpoint['model_state_dict'])
-    global_batch_size = batch_size * num_devices
-    total_steps_done = epoch*(num_train//global_batch_size)
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict']) 
+    if hasattr(voxel2sd, 'module'):
+        voxel2sd.module.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        voxel2sd.load_state_dict(checkpoint['model_state_dict'])
+    total_steps_done = epoch*((num_train//batch_size)//num_devices)
     for _ in range(total_steps_done):
         lr_scheduler.step()
     del checkpoint
     torch.cuda.empty_cache()
+else:
+    epoch = 0
 
 progress_bar = tqdm(range(epoch, num_epochs), ncols=150, disable=(local_rank!=0))
 
@@ -305,32 +368,48 @@ for epoch in progress_bar:
 
     reconst_fails = []
 
-    for train_i, (voxel, image, _) in enumerate(train_dl):
+    # Training loop
+    for train_i, (voxel, image, trial) in enumerate(train_dl):
+        # Zero out gradients
         optimizer.zero_grad()
-
+        # Move image and voxel to device and convert to float
         image = image.to(device).float()
         image_512 = F.interpolate(image, (512, 512), mode='bilinear', align_corners=False, antialias=True)
+        
+        if downsampled:
+            # voxel = downsampled_betas[trial].squeeze()
+            trial = get_trials(trial)
+            voxel = torch.from_numpy(downsampled_betas[trial][:])
         voxel = voxel.to(device).float()
         voxel = utils.voxel_select(voxel)
+
+        # If in the mixup phase of training, apply mixup to voxel
         if epoch <= mixup_pct * num_epochs:
             voxel, perm, betas, select = utils.mixco(voxel)
         else:
             select = None
 
+        # Use mixed precision if enabled
         with torch.cuda.amp.autocast(enabled=use_mp):
+            # If using blurred training, apply median blur to image
             autoenc_image = kornia.filters.median_blur(image_512, (15, 15)) if use_blurred_training else image_512
+            # Encode image using autoencoder
             image_enc = autoenc.encode(2*autoenc_image-1).latent_dist.mode() * 0.18215
+
+            # If using contrastive loss, return transformer features
             if use_cont:
                 image_enc_pred, transformer_feats = voxel2sd(voxel, return_transformer_feats=True)
             else:
                 image_enc_pred = voxel2sd(voxel)
             
+            # If in the mixup phase of training, apply mixup to image encoding
             if epoch <= mixup_pct * num_epochs:
                 image_enc_shuf = image_enc[perm]
                 betas_shape = [-1] + [1]*(len(image_enc.shape)-1)
                 image_enc[select] = image_enc[select] * betas[select].reshape(*betas_shape) + \
                     image_enc_shuf[select] * (1 - betas[select]).reshape(*betas_shape)
             
+            # If using contrastive loss, compute contrastive loss
             if use_cont:
                 image_norm = (image_512 - mean)/std
                 image_aug = (train_augs(image_512) - mean)/std
@@ -348,10 +427,11 @@ for epoch in progress_bar:
             else:
                 cont_loss = torch.tensor(0)
 
-            # mse_loss = F.mse_loss(image_enc_pred, image_enc)/0.18215
+            # Compute L1 loss between predicted and actual image encodings
             mse_loss = F.l1_loss(image_enc_pred, image_enc)
             del image_512, voxel
 
+            # If using reconstruction loss, compute reconstruction loss
             if use_reconst: #epoch >= 0.1 * num_epochs:
                 # decode only non-mixed images
                 if select is not None:
@@ -378,51 +458,70 @@ for epoch in progress_bar:
                 sobel_loss = torch.tensor(0)
             
 
+            # Compute total loss as sum of individual losses
             loss = mse_loss/0.18215 + 2*reconst_loss + 0.1*cont_loss + 16*sobel_loss
             # utils.check_loss(loss)
 
+            # Accumulate individual losses for logging
             loss_mse_sum += mse_loss.item()
             loss_reconst_sum += reconst_loss.item()
             loss_cont_sum += cont_loss.item()
             loss_sobel_sum += sobel_loss.item()
 
+            # Append total loss and learning rate to lists for logging
             losses.append(loss.item())
             lrs.append(optimizer.param_groups[0]['lr'])
 
+            # Log training progress
             if local_rank==0:
                 logs = OrderedDict(
                     train_loss=np.mean(losses[-(train_i+1):]),
                     val_loss=np.nan,
                     lr=lrs[-1],
                 )
+                wandb.log({"epoch": epoch+1, 
+                           "train_loss":np.mean(losses[-(train_i+1):]), 
+                           "lr": lrs[-1]})
                 progress_bar.set_postfix(**logs)
         
+        # Backpropagate loss and update weights
         loss.backward()
         # if reconst_loss > 0:
         #     torch.nn.utils.clip_grad_norm_(voxel2sd.parameters(), 1.0)
         optimizer.step()
 
+        # Step learning rate scheduler
         if lr_scheduler is not None:
             lr_scheduler.step()
 
+    # Validation loop
     if local_rank==0: 
         voxel2sd.eval()
-        for val_i, (voxel, image, _) in enumerate(val_dl): 
+        for val_i, (voxel, image, trial) in enumerate(val_dl): 
             with torch.inference_mode():
+                # Move image and voxel to device and convert to float
                 image = image.to(device).float()
-                image = F.interpolate(image, (512, 512), mode='bilinear', align_corners=False, antialias=True)              
+                image = F.interpolate(image, (512, 512), mode='bilinear', align_corners=False, antialias=True)      
+                if downsampled:
+                    # voxel = downsampled_betas[trial].squeeze()
+                    trial = get_trials(trial)
+                    voxel = torch.from_numpy(downsampled_betas[trial][:])
                 voxel = voxel.to(device).float()
                 voxel = voxel.mean(1)
                 
                 with torch.cuda.amp.autocast(enabled=use_mp):
+                    # Encode image using autoencoder
                     image_enc = autoenc.encode(2*image-1).latent_dist.mode() * 0.18215
+                    # If model is distributed, use module attribute
                     if hasattr(voxel2sd, 'module'):
                         image_enc_pred = voxel2sd.module(voxel)
                     else:
                         image_enc_pred = voxel2sd(voxel)
 
+                    # Compute MSE loss between predicted and actual image encodings
                     mse_loss = F.mse_loss(image_enc_pred, image_enc)
                     
+                    # If using reconstruction loss, compute reconstruction loss and SSIM score
                     if use_reconst:
                         reconst = autoenc.decode(image_enc_pred[-16:]/0.18215).sample
                         image = image[-16:]
@@ -433,17 +532,24 @@ for epoch in progress_bar:
                         reconst_loss = torch.tensor(0)
                         ssim_score = torch.tensor(0)
 
+                    # Accumulate individual losses and SSIM score for logging
                     val_loss_mse_sum += mse_loss.item()
                     val_loss_reconst_sum += reconst_loss.item()
                     val_ssim_score_sum += ssim_score.item()
 
+                    # Append total validation loss to list for logging
                     val_losses.append(mse_loss.item() + reconst_loss.item())        
 
+            # Log validation progress
             logs = OrderedDict(
                 train_loss=np.mean(losses[-(train_i+1):]),
                 val_loss=np.mean(val_losses[-(val_i+1):]),
                 lr=lrs[-1],
             )
+            wandb.log({"epoch": epoch+1, 
+                       "train_loss":np.mean(losses[-(train_i+1):]), 
+                       "val_loss": np.mean(val_losses[-(val_i+1):]), 
+                       "lr": lrs[-1]})
             progress_bar.set_postfix(**logs)
 
         if (not save_at_end and ckpt_saving) or (save_at_end and epoch == num_epochs - 1):
