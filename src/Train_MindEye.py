@@ -1,20 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[ ]:
-
-
-# # Code to convert this notebook to .py if you want to run it via command line or with Slurm
-# from subprocess import call
-# command = "jupyter nbconvert Train_MindEye.ipynb --to python"
-# call(command,shell=True)
-
-
-# # Import packages & functions
-
-# In[2]:
-
-
 import os
 import sys
 import json
@@ -51,7 +37,7 @@ print("distributed =",distributed, "num_devices =", num_devices, "local rank =",
 
 # # Configurations
 
-# In[3]:
+# In[15]:
 
 
 # if running this interactively, can specify jupyter_args here for argparser to use
@@ -70,7 +56,7 @@ if utils.is_interactive():
     get_ipython().run_line_magic('autoreload', '2 # this allows you to change functions in models.py or utils.py and have this notebook automatically update with your revisions')
 
 
-# In[4]:
+# In[28]:
 
 
 parser = argparse.ArgumentParser(description="Model Training Configuration")
@@ -102,7 +88,7 @@ parser.add_argument(
     help="whether to log to wandb",
 )
 parser.add_argument(
-    "--resume_from_ckpt",action=argparse.BooleanOptionalAction,default=False,
+    "--resume_from_ckpt",action=argparse.BooleanOptionalAction,default=True,
     help="if not using wandb and want to resume from a ckpt",
 )
 parser.add_argument(
@@ -192,7 +178,14 @@ max_lr *= accelerator.num_processes
 num_epochs *= accelerator.num_processes
 
 
-# In[5]:
+# In[32]:
+
+
+model_name = "new_1cm"
+n_samples_save = 0
+
+
+# In[18]:
 
 
 outdir = os.path.abspath(f'../train_logs/{model_name}')
@@ -213,11 +206,11 @@ if use_image_aug:
 
 # # Prep models and data loaders
 
-# In[6]:
+# In[44]:
 
 
 print('Pulling NSD webdataset data...')
-
+data_path = "./wds-cache"
 train_url = "{" + f"{data_path}/webdataset_avg_split/train/train_subj0{subj}_" + "{0..17}.tar," + f"{data_path}/webdataset_avg_split/val/val_subj0{subj}_0.tar" + "}"
 val_url = f"{data_path}/webdataset_avg_split/test/test_subj0{subj}_" + "{0..1}.tar"
 print(train_url,"\n",val_url)
@@ -226,7 +219,7 @@ num_train = 8559 + 300
 num_val = 982
 
 print('Prepping train and validation dataloaders...')
-train_dl, val_dl, num_train, num_val = utils.get_dataloaders(
+train_dl, val_dl, num_train, num_val, _= utils.get_dataloaders(
     batch_size,'images',
     num_devices=num_devices,
     num_workers=num_workers,
@@ -239,13 +232,19 @@ train_dl, val_dl, num_train, num_val = utils.get_dataloaders(
     cache_dir=data_path, #"/tmp/wds-cache",
     seed=seed,
     voxels_key='nsdgeneral.npy',
-    to_tuple=["voxels", "images", "coco"],
+    to_tuple=["voxels", "images", "coco", "trial"],
     local_rank=local_rank,
     world_size=world_size,
 )
 
 
-# In[7]:
+# In[34]:
+
+
+vd_cache_dir = "./vd-cache-dir/models--shi-labs--versatile-diffusion/snapshots/2926f8e11ea526b562cd592b099fcf9c2985d0b7"
+
+
+# In[35]:
 
 
 print('Creating Clipper...')
@@ -267,7 +266,7 @@ print("out_dim:",out_dim)
 
 print('Creating voxel2clip...')
 if subj == 1:
-    num_voxels = 15724
+    num_voxels = 363
 elif subj == 2:
     num_voxels = 14278
 elif subj == 3:
@@ -456,16 +455,16 @@ print("\nDone with model preparations!")
 # In[8]:
 
 
+wandb_log = True
 # params for wandb
 if local_rank==0 and wandb_log: # only use main process for wandb logging
     import wandb
     
-    wandb_project = 'stability'
+    wandb_project = 'new_1cm'
     wandb_run = model_name
     wandb_notes = ''
     
     print(f"wandb {wandb_project} run {wandb_run}")
-    wandb.login(host='https://stability.wandb.io')#, relogin=True)
     wandb_config = {
       "model_name": model_name,
       "clip_variant": clip_variant,
@@ -508,7 +507,7 @@ else:
 
 # # Main
 
-# In[9]:
+# In[23]:
 
 
 epoch = 0
@@ -554,12 +553,44 @@ elif wandb_log:
 torch.cuda.empty_cache()
 
 
-# In[10]:
+# In[24]:
 
 
 diffusion_prior, optimizer, train_dl, val_dl, lr_scheduler = accelerator.prepare(
 diffusion_prior, optimizer, train_dl, val_dl, lr_scheduler
 )
+
+
+# In[42]:
+
+
+import h5py
+with h5py.File('betas_1cm_subj01.hdf5', 'r') as hdf:
+    # Load the entire data into memory as a numpy array
+    downsampled_betas = np.array(hdf['betas'])
+    # downsampled_betas =  torch.from_numpy(hdf['betas'][:])
+# load coco 73k indices
+indices_path = "COCO_73k_subj_indices.hdf5"
+hdf5_file = h5py.File(indices_path, "r")
+indices = hdf5_file[f"subj01"][:]
+valid_indices = indices[:len(downsampled_betas)]
+
+def get_trials(trial):
+    same_image_trials = []
+    for trial_el in trial:
+        same_im = np.where(valid_indices == valid_indices[trial_el[0]])[0]
+        arr = same_im
+        if len(same_im) == 1:
+            arr = np.array([same_im[0], same_im[0], same_im[0]])
+        elif len(same_im) == 2:
+            arr = np.array([same_im[0], same_im[1], same_im[1]])
+        same_image_trials.append(arr)
+    return same_image_trials
+def get_voxels(trial):
+    all_trials = get_trials(trial)
+    voxel = torch.from_numpy(downsampled_betas[all_trials][:])
+    voxel = voxel.to(device)
+    return voxel
 
 
 # In[11]:
@@ -582,7 +613,7 @@ for epoch in progress_bar:
     val_loss_nce_sum = 0.
     val_loss_prior_sum = 0.
 
-    for train_i, (voxel, image, coco) in enumerate(train_dl):
+    for train_i, (voxel, image, coco, trial) in enumerate(train_dl):
         with torch.cuda.amp.autocast():
             optimizer.zero_grad()
 
@@ -592,8 +623,8 @@ for epoch in progress_bar:
                 image = img_augment(image)
                 # plt.imshow(utils.torch_to_Image(image))
                 # plt.show()
-
-            voxel = voxel[:,repeat_index].float()
+            true_voxel = get_voxels(trial)
+            voxel = true_voxel[:,repeat_index].float()
 
             if epoch < int(mixup_pct * num_epochs):
                 voxel, perm, betas, select = utils.mixco(voxel)
@@ -659,13 +690,14 @@ for epoch in progress_bar:
                 lr_scheduler.step()
 
     diffusion_prior.eval()
-    for val_i, (voxel, image, coco) in enumerate(val_dl): 
+    for val_i, (voxel, image, coco, trial) in enumerate(val_dl): 
         with torch.no_grad():
             with torch.cuda.amp.autocast():
                 # repeat_index = val_i % 3
 
                 # voxel = voxel[:,repeat_index].float()
-                voxel = torch.mean(voxel,axis=1).float()
+                true_voxel = get_voxels(trial)
+                voxel = torch.mean(true_voxel,axis=1).float()
                 
                 if use_image_aug:
                     image = img_augment(image)
@@ -817,4 +849,3 @@ for epoch in progress_bar:
 print("\n===Finished!===\n")
 if not utils.is_interactive():
     sys.exit(0)
-
