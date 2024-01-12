@@ -88,7 +88,7 @@ parser.add_argument(
     help="whether to log to wandb",
 )
 parser.add_argument(
-    "--resume_from_ckpt",action=argparse.BooleanOptionalAction,default=True,
+    "--resume_from_ckpt",action=argparse.BooleanOptionalAction,default=False,
     help="if not using wandb and want to resume from a ckpt",
 )
 parser.add_argument(
@@ -181,8 +181,9 @@ num_epochs *= accelerator.num_processes
 # In[32]:
 
 
-model_name = "new_1cm"
-n_samples_save = 0
+model_name = "new_1cm_2gpu_again"
+n_samples_save = 1
+
 
 
 # In[18]:
@@ -460,7 +461,7 @@ wandb_log = True
 if local_rank==0 and wandb_log: # only use main process for wandb logging
     import wandb
     
-    wandb_project = 'new_1cm'
+    wandb_project = 'train_mindeye'
     wandb_run = model_name
     wandb_notes = ''
     
