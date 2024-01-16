@@ -256,29 +256,29 @@ def get_dataloaders(
         test_url = list(braceexpand.braceexpand(test_url))
         
         from tqdm import tqdm
-        for url in tqdm(train_url):
-            destination = cache_dir + "/" + url.rsplit('/', 1)[-1]
-            print(f"\nDownloading {url} to {destination}...")
-            response = requests.get(url)
-            response.raise_for_status()
-            with open(destination, 'wb') as file:
-                file.write(response.content)
+        # for url in tqdm(train_url):
+        #     destination = cache_dir + "/" + url.rsplit('/', 1)[-1]
+        #     print(f"\nDownloading {url} to {destination}...")
+        #     response = requests.get(url)
+        #     response.raise_for_status()
+        #     with open(destination, 'wb') as file:
+        #         file.write(response.content)
                 
-        for url in tqdm(val_url):
-            destination = cache_dir + "/" + url.rsplit('/', 1)[-1]
-            print(f"\nDownloading {url} to {destination}...")
-            response = requests.get(url)
-            response.raise_for_status()
-            with open(destination, 'wb') as file:
-                file.write(response.content)
+        # for url in tqdm(val_url):
+        #     destination = cache_dir + "/" + url.rsplit('/', 1)[-1]
+        #     print(f"\nDownloading {url} to {destination}...")
+        #     response = requests.get(url)
+        #     response.raise_for_status()
+        #     with open(destination, 'wb') as file:
+        #         file.write(response.content)
                 
-        for url in tqdm(test_url):
-            destination = cache_dir + "/" + url.rsplit('/', 1)[-1]
-            print(f"\nDownloading {url} to {destination}...")
-            response = requests.get(url)
-            response.raise_for_status()
-            with open(destination, 'wb') as file:
-                file.write(response.content)
+        # for url in tqdm(test_url):
+        #     destination = cache_dir + "/" + url.rsplit('/', 1)[-1]
+        #     print(f"\nDownloading {url} to {destination}...")
+        #     response = requests.get(url)
+            # response.raise_for_status()
+            # with open(destination, 'wb') as file:
+            #     file.write(response.content)
 
     if num_devices is None:
         num_devices = torch.cuda.device_count()

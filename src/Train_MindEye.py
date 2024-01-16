@@ -178,7 +178,9 @@ else:
 # create global variables without the args prefix
 for attribute_name in vars(args).keys():
     globals()[attribute_name] = getattr(args, attribute_name)
-    
+
+vd_cache_dir = "./vd-cache-dir/models--shi-labs--versatile-diffusion/snapshots/2926f8e11ea526b562cd592b099fcf9c2985d0b7"
+model_name = "original_mindeye_1gpu"
 # need non-deterministic CuDNN for conv3D to work
 utils.seed_everything(seed, cudnn_deterministic=False)
 
@@ -218,6 +220,7 @@ if use_image_aug:
 
 print('Pulling NSD webdataset data...')
 
+data_path = "./wds-cache"
 train_url = "{" + f"{data_path}/webdataset_avg_split/train/train_subj0{subj}_" + "{0..17}.tar," + f"{data_path}/webdataset_avg_split/val/val_subj0{subj}_0.tar" + "}"
 val_url = f"{data_path}/webdataset_avg_split/test/test_subj0{subj}_" + "{0..1}.tar"
 print(train_url,"\n",val_url)
@@ -455,17 +458,16 @@ print("\nDone with model preparations!")
 
 # In[8]:
 
-
+wandb_log = True
 # params for wandb
 if local_rank==0 and wandb_log: # only use main process for wandb logging
     import wandb
     
-    wandb_project = 'stability'
+    wandb_project = 'train_mindeye'
     wandb_run = model_name
     wandb_notes = ''
     
     print(f"wandb {wandb_project} run {wandb_run}")
-    wandb.login(host='https://stability.wandb.io')#, relogin=True)
     wandb_config = {
       "model_name": model_name,
       "clip_variant": clip_variant,
