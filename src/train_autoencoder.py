@@ -28,7 +28,7 @@ import h5py
 import wandb
 
 # Replace 'yourfile.hdf5' with the path to your .hdf5 file
-with h5py.File('betas_1cm_subj01.hdf5', 'r') as hdf:
+with h5py.File('betas_1cm_subj01.hdf5.2', 'r') as hdf:
     # Load the entire data into memory as a numpy array
     downsampled_betas = np.array(hdf['betas'])
     # downsampled_betas =  torch.from_numpy(hdf['betas'][:])
@@ -96,22 +96,23 @@ autoenc.requires_grad_(False)
 autoenc.eval()
 
 # # Configurations
-downsampled = 0
+downsampled = 1
 if not downsampled:
     model_name = "autoencoder_large"
 else:
-    model_name = "autoencoder_128_3xdataset"
+    model_name = "autoencoder_367"
 
 h=4096
 # start a new wandb run to track this script
 wandb.init(
     # set the wandb project where this run will be logged
-    project=model_name,
-    
+    project="autoencoder",
+    name=model_name,
     # track hyperparameters and run metadata
     config={
+    "model_name": model_name,
     "hidden_units": h,
-    "input_dim": 363 if downsampled else 15724
+    "input_dim": 367 if downsampled else 15724
     }
 )
 modality = "image" # ("image", "text")
@@ -204,7 +205,7 @@ n_cache_recs = 0
 if local_rank == 0: print('Creating voxel2sd...')
 in_dims = {'01': 15724, '02': 14278, '05': 13039, '07':12682}
 if downsampled:
-    in_dims = {'01': 363, '02': 14278, '05': 13039, '07':12682}
+    in_dims = {'01': 367, '02': 14278, '05': 13039, '07':12682}
 if voxel_dims == 1: # 1D data
     voxel2sd = Voxel2StableDiffusionModel(use_cont=use_cont, in_dim=in_dims[subj_id], h=h, ups_mode=ups_mode)
 elif voxel_dims == 3: # 3D data
@@ -242,7 +243,7 @@ train_dl, val_dl, num_train, num_val, _ = utils.get_dataloaders(
     val_url=val_url,
     meta_url=meta_url,
     val_batch_size=max(16, batch_size),
-    cache_dir='/tmp/wds-cache',
+    cache_dir='./wds-cache',
     seed=seed+local_rank,
     voxels_key='nsdgeneral.npy',
     local_rank=local_rank,
