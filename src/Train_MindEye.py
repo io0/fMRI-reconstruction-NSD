@@ -181,8 +181,7 @@ num_epochs *= accelerator.num_processes
 # In[32]:
 
 
-model_name = "new_1cm_2gpu_again"
-n_samples_save = 1
+model_name = "1cm_fnirs_367_env_replicated"
 
 
 
@@ -212,8 +211,8 @@ if use_image_aug:
 
 print('Pulling NSD webdataset data...')
 data_path = "./wds-cache"
-train_url = "{" + f"{data_path}/webdataset_avg_split/train/train_subj0{subj}_" + "{0..17}.tar," + f"{data_path}/webdataset_avg_split/val/val_subj0{subj}_0.tar" + "}"
-val_url = f"{data_path}/webdataset_avg_split/test/test_subj0{subj}_" + "{0..1}.tar"
+train_url = "{" + f"{data_path}/train_subj0{subj}_" + "{0..17}.tar," + f"{data_path}/val_subj0{subj}_0.tar" + "}"
+val_url = f"{data_path}/test_subj0{subj}_" + "{0..1}.tar"
 print(train_url,"\n",val_url)
 meta_url = f"{data_path}/webdataset_avg_split/metadata_subj0{subj}.json"
 num_train = 8559 + 300
@@ -267,7 +266,7 @@ print("out_dim:",out_dim)
 
 print('Creating voxel2clip...')
 if subj == 1:
-    num_voxels = 363
+    num_voxels = 367
 elif subj == 2:
     num_voxels = 14278
 elif subj == 3:
@@ -566,7 +565,7 @@ diffusion_prior, optimizer, train_dl, val_dl, lr_scheduler
 
 
 import h5py
-with h5py.File('betas_1cm_subj01.hdf5', 'r') as hdf:
+with h5py.File('betas_1cm_subj01.hdf5.2', 'r') as hdf:
     # Load the entire data into memory as a numpy array
     downsampled_betas = np.array(hdf['betas'])
     # downsampled_betas =  torch.from_numpy(hdf['betas'][:])
