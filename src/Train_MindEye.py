@@ -6,7 +6,7 @@
 
 # # Code to convert this notebook to .py if you want to run it via command line or with Slurm
 # from subprocess import call
-# command = "jupyter nbconvert Train_MindEye.ipynb --to python"
+# command = "jupyter nbconvert Train_MindEye_betas1cm.ipynb --to python"
 # call(command,shell=True)
 
 
@@ -18,12 +18,15 @@
 import os
 import sys
 import json
+import gc
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 from tqdm import tqdm
+from datetime import datetime
+print(datetime.now().strftime("%I:%M %p"))
 
 # tf32 data type is faster than standard float32
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -33,20 +36,29 @@ import utils
 from models import Clipper, BrainNetwork, BrainDiffusionPrior, BrainDiffusionPriorOld, VersatileDiffusionPriorNetwork
 
 # Multi-GPU config #
+local_rank = os.getenv('RANK')
+if local_rank is None: 
+    local_rank = 0
+else:
+    local_rank = int(local_rank)
+print("LOCAL RANK ", local_rank)
+
 from accelerate import Accelerator
-accelerator = Accelerator(split_batches=False,mixed_precision='fp16')  
-print("PID of this process =",os.getpid())
-print = accelerator.print # only print if local_rank=0
-device = accelerator.device
-print("device:",device)
 num_devices = torch.cuda.device_count()
 if num_devices==0: num_devices = 1
+
+clip_extractor = Clipper("ViT-L/14", device=torch.device(f"cuda:{local_rank}"), hidden_state=True, norm_embs=True)
+
+accelerator = Accelerator(split_batches=False, mixed_precision='fp16')
+
+print("PID of this process =",os.getpid())
+device = accelerator.device
+print("device:",device)
 num_workers = num_devices
 print(accelerator.state)
-local_rank = accelerator.state.local_process_index
-world_size = accelerator.state.num_processes
 distributed = not accelerator.state.distributed_type == 'NO'
-print("distributed =",distributed, "num_devices =", num_devices, "local rank =", local_rank, "world size =", world_size)
+print("distributed =",distributed, "num_devices =", num_devices, "local rank =", local_rank)
+print = accelerator.print # only print if local_rank=0
 
 
 # # Configurations
@@ -57,17 +69,18 @@ print("distributed =",distributed, "num_devices =", num_devices, "local rank =",
 # if running this interactively, can specify jupyter_args here for argparser to use
 if utils.is_interactive():
     # Example use
-    jupyter_args = "--data_path=/fsx/proj-medarc/fmri/natural-scenes-dataset \
+    jupyter_args = f"--data_path=/fsx/proj-fmri/shared/natural-scenes-dataset \
                     --model_name=test \
-                    --subj=1 --hidden --clip_variant=ViT-L/14 --batch_size=32 --n_samples_save=0 \
-                    --max_lr=3e-4 --mixup_pct=.33 --num_epochs=240 --ckpt_interval=5 --use_image_aug"
-    
+                    --subj=1 --hidden --clip_variant=ViT-L/14 --batch_size=32 --n_samples_save=0 --no-ckpt_saving \
+                    --max_lr=3e-4 --mixup_pct=.5 --num_epochs=30 --ckpt_interval=999 --no-use_image_aug"# --wandb_log"
+    # --no-ckpt_saving
     jupyter_args = jupyter_args.split()
     print(jupyter_args)
     
     from IPython.display import clear_output # function to clear print outputs in cell
     get_ipython().run_line_magic('load_ext', 'autoreload')
-    get_ipython().run_line_magic('autoreload', '2 # this allows you to change functions in models.py or utils.py and have this notebook automatically update with your revisions')
+    # this allows you to change functions in models.py or utils.py and have this notebook automatically update with your revisions
+    get_ipython().run_line_magic('autoreload', '2')
 
 
 # In[4]:
@@ -79,7 +92,7 @@ parser.add_argument(
     help="name of model, used for ckpt saving and wandb logging (if enabled)",
 )
 parser.add_argument(
-    "--data_path", type=str, default="/fsx/proj-medarc/fmri/natural-scenes-dataset",
+    "--data_path", type=str, default="/fsx/proj-fmri/shared/natural-scenes-dataset",
     help="Path to where NSD data is stored / where to download it to",
 )
 parser.add_argument(
@@ -148,10 +161,6 @@ parser.add_argument(
     help="save backup ckpt and reconstruct every x epochs",
 )
 parser.add_argument(
-    "--save_at_end",action=argparse.BooleanOptionalAction,default=False,
-    help="if True, saves best.ckpt at end of training. if False and ckpt_saving==True, will save best.ckpt whenever epoch shows best validation score",
-)
-parser.add_argument(
     "--seed",type=int,default=42,
 )
 parser.add_argument(
@@ -166,7 +175,7 @@ parser.add_argument(
     help="Additional MLP after the main MLP so model can separately learn a way to minimize NCE from prior loss (BYOL)",
 )
 parser.add_argument(
-    "--vd_cache_dir", type=str, default='/fsx/proj-medarc/fmri/cache/models--shi-labs--versatile-diffusion/snapshots/2926f8e11ea526b562cd592b099fcf9c2985d0b7',
+    "--vd_cache_dir", type=str, default='/fsx/proj-fmri/shared/cache/models--shi-labs--versatile-diffusion/snapshots/2926f8e11ea526b562cd592b099fcf9c2985d0b7',
     help="Where is cached Versatile Diffusion model; if not cached will download to this path",
 )
 
@@ -180,18 +189,19 @@ for attribute_name in vars(args).keys():
     globals()[attribute_name] = getattr(args, attribute_name)
 
 vd_cache_dir = "./vd-cache-dir/models--shi-labs--versatile-diffusion/snapshots/2926f8e11ea526b562cd592b099fcf9c2985d0b7"
-model_name = "original_mindeye_1gpu"
+model_name = "1cm_fnirs_replication"
 # need non-deterministic CuDNN for conv3D to work
 utils.seed_everything(seed, cudnn_deterministic=False)
 
-# change learning rate based on number of devices
-max_lr *= accelerator.num_processes
-    
-# change batch size based on number of devices if using multi-gpu
-# batch_size *= accelerator.num_processes
+batch_size = int(batch_size / num_devices)
+print("batch_size", batch_size)
+# batch_size = batch_size // 2
 
-# change num_epochs based on number of devices if using multi-gpu
-num_epochs *= accelerator.num_processes
+# if you double your batch size (which will happen if we use 2 gpus) then you should double your learning rate
+# max_lr *= num_devices
+
+# change num_epochs to account for same number of total steps across varying #s of gpu
+# num_epochs = num_epochs // num_devices
 
 
 # In[5]:
@@ -206,9 +216,10 @@ if use_image_aug:
     img_augment = AugmentationSequential(
         kornia.augmentation.RandomResizedCrop((224,224), (0.6,1), p=0.3),
         kornia.augmentation.Resize((224, 224)),
-        kornia.augmentation.RandomHorizontalFlip(p=0.5),
+        kornia.augmentation.RandomHorizontalFlip(p=0.3),
         kornia.augmentation.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.3),
         kornia.augmentation.RandomGrayscale(p=0.3),
+        same_on_batch=False,
         data_keys=["input"],
     )
 
@@ -221,18 +232,19 @@ if use_image_aug:
 print('Pulling NSD webdataset data...')
 
 data_path = "./wds-cache"
-train_url = "{" + f"{data_path}/webdataset_avg_split/train/train_subj0{subj}_" + "{0..17}.tar," + f"{data_path}/webdataset_avg_split/val/val_subj0{subj}_0.tar" + "}"
-val_url = f"{data_path}/webdataset_avg_split/test/test_subj0{subj}_" + "{0..1}.tar"
+train_url = "{" + f"{data_path}/train_subj0{subj}_" + "{0..17}.tar," + f"{data_path}/val_subj0{subj}_0.tar" + "}"
+# train_url = f"{data_path}/webdataset_avg_split/train/train_subj0{subj}_" + "0.tar"
+val_url = f"{data_path}/test_subj0{subj}_" + "{0..1}.tar"
 print(train_url,"\n",val_url)
 meta_url = f"{data_path}/webdataset_avg_split/metadata_subj0{subj}.json"
-num_train = 8559 + 300
+num_train = (8559 + 300) // num_devices
 num_val = 982
 
 print('Prepping train and validation dataloaders...')
 train_dl, val_dl, num_train, num_val = utils.get_dataloaders(
     batch_size,'images',
     num_devices=num_devices,
-    num_workers=num_workers,
+    num_workers=num_devices,
     train_url=train_url,
     val_url=val_url,
     meta_url=meta_url,
@@ -244,28 +256,38 @@ train_dl, val_dl, num_train, num_val = utils.get_dataloaders(
     voxels_key='nsdgeneral.npy',
     to_tuple=["voxels", "images", "coco"],
     local_rank=local_rank,
-    world_size=world_size,
 )
 
 
 # In[7]:
 
 
+for val_i, (voxel, img_input, coco) in enumerate(val_dl):
+    print("idx",val_i)
+    print("voxel.shape",voxel.shape)
+    print("img_input.shape",img_input.shape)
+    break
+
+
+# In[9]:
+
+
 print('Creating Clipper...')
 clip_sizes = {"RN50": 1024, "ViT-L/14": 768, "ViT-B/32": 512, "ViT-H-14": 1024}
 clip_size = clip_sizes[clip_variant]
-if hidden:
-    print("Using hidden layer CLIP space (Versatile Diffusion)")
-    if not norm_embs:
-        print("WARNING: YOU WANT NORMED EMBEDDINGS FOR VERSATILE DIFFUSION!")
-    clip_extractor = Clipper(clip_variant, device=device, hidden_state=True, norm_embs=norm_embs)
-    out_dim = 257 * clip_size
-else:
-    print("Using final layer CLIP space (Stable Diffusion Img Variations)")
-    if norm_embs:
-        print("WARNING: YOU WANT UN-NORMED EMBEDDINGS FOR IMG VARIATIONS!")
-    clip_extractor = Clipper(clip_variant, device=device, hidden_state=False, norm_embs=norm_embs)
-    out_dim = clip_size
+out_dim = 257 * clip_size
+# if clip_extractor is None:
+#     if hidden:
+#         print("Using hidden layer CLIP space (Versatile Diffusion)")
+#         if not norm_embs:
+#             print("WARNING: YOU WANT NORMED EMBEDDINGS FOR VERSATILE DIFFUSION!")
+#         clip_extractor = Clipper(clip_variant, device=torch.device('cuda'), hidden_state=True, norm_embs=norm_embs)
+#     else:
+#         print("Using final layer CLIP space (Stable Diffusion Img Variations)")
+#         if norm_embs:
+#             print("WARNING: YOU WANT UN-NORMED EMBEDDINGS FOR IMG VARIATIONS!")
+#         clip_extractor = Clipper(clip_variant, device=torch.device('cuda'), hidden_state=False, norm_embs=norm_embs)
+#         out_dim = clip_size
 print("out_dim:",out_dim)
 
 print('Creating voxel2clip...')
@@ -285,9 +307,26 @@ elif subj == 7:
     num_voxels = 12682
 elif subj == 8:
     num_voxels = 14386
+
+
+# load betas
+import h5py
+f = h5py.File(f'./betas_1cm_subj0{subj}.hdf5', 'r')
+voxels0 = f['betas'][:]
+print(f"subj0{subj} betas loaded into memory")
+voxels0 = torch.Tensor(voxels0).to("cpu").half()
+print("voxels", voxels0.shape)
+num_voxels = voxels0.shape[-1]
+
+# # load betas
+# voxels0 = np.load("concat_betas.npy")
+# voxels0 = torch.Tensor(voxels0)
+# num_voxels = voxels0.shape[-1]
+
+
 voxel2clip_kwargs = dict(in_dim=num_voxels,out_dim=out_dim,clip_size=clip_size,use_projector=use_projector)
 voxel2clip = BrainNetwork(**voxel2clip_kwargs)
-    
+
 # load from ckpt
 voxel2clip_path = "None"
 if voxel2clip_path!="None":
@@ -352,23 +391,30 @@ if local_rank==0:
     utils.count_params(diffusion_prior)
 
 no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-opt_grouped_parameters = [
-    {'params': [p for n, p in diffusion_prior.net.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': 1e-2},
-    {'params': [p for n, p in diffusion_prior.net.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0},
-    {'params': [p for n, p in diffusion_prior.voxel2clip.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': 1e-2},
-    {'params': [p for n, p in diffusion_prior.voxel2clip.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-]
+if prior:
+    opt_grouped_parameters = [
+        {'params': [p for n, p in diffusion_prior.net.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': 1e-2},
+        {'params': [p for n, p in diffusion_prior.net.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0},
+        {'params': [p for n, p in diffusion_prior.voxel2clip.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': 1e-2},
+        {'params': [p for n, p in diffusion_prior.voxel2clip.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    ]
+else:
+    opt_grouped_parameters = [
+        {'params': [p for n, p in diffusion_prior.voxel2clip.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': 1e-2},
+        {'params': [p for n, p in diffusion_prior.voxel2clip.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    ]
+
+# optimizer = OnebitAdam(opt_grouped_parameters, cuda_aware=True, comm_backend_name='mpi', lr=max_lr)
 optimizer = torch.optim.AdamW(opt_grouped_parameters, lr=max_lr)
 
-global_batch_size = batch_size * num_devices
 if lr_scheduler_type == 'linear':
     lr_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
-        total_iters=int(num_epochs*(num_train//global_batch_size)),
+        total_iters=int(num_epochs*(num_train*num_devices//batch_size)),
         last_epoch=-1
     )
 elif lr_scheduler_type == 'cycle':
-    total_steps=int(num_epochs*(num_train//global_batch_size))
+    total_steps=int(num_epochs*(num_train*num_devices//batch_size))
     lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, 
         max_lr=max_lr,
@@ -415,12 +461,11 @@ if n_samples_save > 0 and hidden:
     unet = vd_pipe.image_unet
     vae = vd_pipe.vae
     noise_scheduler = vd_pipe.scheduler
-
 elif n_samples_save > 0:
     print('Creating SD image variations reconstruction pipeline...')
     from diffusers import AutoencoderKL, UNet2DConditionModel, UniPCMultistepScheduler
 
-    sd_cache_dir = '/fsx/home-paulscotti/.cache/huggingface/diffusers/models--lambdalabs--sd-image-variations-diffusers/snapshots/a2a13984e57db80adcc9e3f85d568dcccb9b29fc'
+    sd_cache_dir = '/fsx/proj-fmri/shared/cache/models--lambdalabs--sd-image-variations-diffusers/snapshots/42bc0ee1726b141d49f519a6ea02ccfbf073db2e'
     unet = UNet2DConditionModel.from_pretrained(sd_cache_dir,subfolder="unet").to(device)
 
     unet.eval() # dont want to train model
@@ -456,7 +501,8 @@ print("\nDone with model preparations!")
 
 # # Weights and Biases
 
-# In[8]:
+# In[10]:
+
 
 wandb_log = True
 # params for wandb
@@ -482,9 +528,6 @@ if local_rank==0 and wandb_log: # only use main process for wandb logging
       "seed": seed,
       "distributed": distributed,
       "num_devices": num_devices,
-      "world_size": world_size,
-      "train_url": train_url,
-      "val_url": val_url,
     }
     print("wandb_config:\n",wandb_config)
     if True: # wandb_auto_resume
@@ -510,7 +553,7 @@ else:
 
 # # Main
 
-# In[9]:
+# In[11]:
 
 
 epoch = 0
@@ -556,7 +599,7 @@ elif wandb_log:
 torch.cuda.empty_cache()
 
 
-# In[10]:
+# In[12]:
 
 
 diffusion_prior, optimizer, train_dl, val_dl, lr_scheduler = accelerator.prepare(
@@ -564,7 +607,7 @@ diffusion_prior, optimizer, train_dl, val_dl, lr_scheduler
 )
 
 
-# In[11]:
+# In[24]:
 
 
 print(f"{model_name} starting with epoch {epoch} / {num_epochs}")
@@ -589,18 +632,23 @@ for epoch in progress_bar:
             optimizer.zero_grad()
 
             repeat_index = train_i % 3
-            
-            if use_image_aug:
-                image = img_augment(image)
-                # plt.imshow(utils.torch_to_Image(image))
-                # plt.show()
 
-            voxel = voxel[:,repeat_index].float()
+            image = image.squeeze(0)
+            voxel = voxel.squeeze(0)
+            
+            if use_image_aug: image = img_augment(image)
+
+            # voxel = voxel[:,repeat_index]
+            voxel = voxels0[coco.cpu().long().flatten()].to(device)
+
+            if train_i==0 and epoch==0:
+                print("image", image.shape, local_rank)
+                print("voxel", voxel.shape, local_rank)
 
             if epoch < int(mixup_pct * num_epochs):
                 voxel, perm, betas, select = utils.mixco(voxel)
 
-            clip_target = clip_extractor.embed_image(image).float()   
+            clip_target = clip_extractor.embed_image(image)
 
             clip_voxels, clip_voxels_proj = diffusion_prior.module.voxel2clip(voxel) if distributed else diffusion_prior.voxel2clip(voxel)
             if hidden:
@@ -660,23 +708,28 @@ for epoch in progress_bar:
             if lr_scheduler_type is not None:
                 lr_scheduler.step()
 
+            torch.cuda.empty_cache()
+            gc.collect()
+
     diffusion_prior.eval()
     for val_i, (voxel, image, coco) in enumerate(val_dl): 
         with torch.no_grad():
             with torch.cuda.amp.autocast():
-                # repeat_index = val_i % 3
-
-                # voxel = voxel[:,repeat_index].float()
-                voxel = torch.mean(voxel,axis=1).float()
+                image = image.squeeze(0)
+                voxel = voxel.squeeze(0)
                 
-                if use_image_aug:
-                    image = img_augment(image)
+                if val_i==0 and epoch==0:
+                    print("valimage", image.shape, local_rank)
+                    print("valvoxel", voxel.shape, local_rank)
+
+                # voxel = torch.mean(voxel,axis=1)
+                voxel = voxels0[coco.cpu().long().flatten()].to(device)
 
                 if val_image0 is None:
                     val_image0 = image.detach().clone()
                     val_voxel0 = voxel.detach().clone()
 
-                clip_target = clip_extractor.embed_image(image).float()
+                clip_target = clip_extractor.embed_image(image)
 
                 clip_voxels, clip_voxels_proj = diffusion_prior.module.voxel2clip(voxel) if distributed else diffusion_prior.voxel2clip(voxel)
                 if hidden:
@@ -725,19 +778,10 @@ for epoch in progress_bar:
                 labels = torch.arange(len(clip_target_norm)).to(device)
                 val_fwd_percent_correct += utils.topk(utils.batchwise_cosine_similarity(clip_voxels_norm,clip_target_norm), labels, k=1)
                 val_bwd_percent_correct += utils.topk(utils.batchwise_cosine_similarity(clip_target_norm, clip_voxels_norm), labels, k=1)
-
-    if local_rank==0:        
-        if (not save_at_end and ckpt_saving) or (save_at_end and epoch == num_epochs - 1):
-            # save best model
-            val_loss = np.mean(val_losses[-(val_i+1):])
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                save_ckpt('best')
-            else:
-                print(f'not best - val_loss: {val_loss:.3f}, best_val_loss: {best_val_loss:.3f}')
-                
-        if utils.is_interactive():
-            clear_output(wait=True)
+    
+    if local_rank==0: 
+        # if utils.is_interactive():
+        #     clear_output(wait=True)
             
         logs = {"train/loss": np.mean(losses[-(train_i+1):]),
             "val/loss": np.mean(val_losses[-(val_i+1):]),
@@ -755,11 +799,14 @@ for epoch in progress_bar:
             "val/loss_nce": val_loss_nce_sum / (val_i + 1),
             "val/loss_prior": val_loss_prior_sum / (val_i + 1)}
         progress_bar.set_postfix(**logs)
+        print("\n_LOGS_\n",logs)
 
         # Save model checkpoint and reconstruct
-        save_ckpt(f'last')
+        # save_ckpt(f'last')
         if epoch % ckpt_interval == 0:
-            save_ckpt(f'last_backup')
+            if ckpt_saving:
+                save_ckpt(f'last')
+            # save_ckpt(f'last_backup')
             if n_samples_save > 0:
                 del clip_voxels, clip_voxels_proj, image, voxel # free up some memory
                 print('reconstructing...')
@@ -769,7 +816,7 @@ for epoch in progress_bar:
                     grid, _, _, _ = utils.reconstruction(
                         val_image0, val_voxel0,
                         clip_extractor, unet, vae, noise_scheduler,
-                        diffusion_priors = diffusion_prior.module if distributed else diffusion_prior,
+                        diffusion_priors = diffusion_prior,
                         num_inference_steps = num_inference_steps,
                         n_samples_save = 1,
                         guidance_scale = guidance_scale,
@@ -789,34 +836,15 @@ for epoch in progress_bar:
                 if hidden:
                     vd_pipe = vd_pipe.to('cpu')
                 
-                if plot_umap:
-                    print('umap plotting...')
-                    combined = np.concatenate((clip_target.flatten(1).detach().cpu().numpy(),
-                                               aligned_clip_voxels.flatten(1).detach().cpu().numpy()),axis=0)
-                    reducer = umap.UMAP(random_state=42)
-                    embedding = reducer.fit_transform(combined)
-
-                    colors=np.array([[0,0,1,.5] for i in range(len(clip_target))])
-                    colors=np.concatenate((colors, np.array([[0,1,0,.5] for i in range(len(aligned_clip_voxels))])))
-
-                    fig = plt.figure(figsize=(5,5))
-                    plt.scatter(
-                        embedding[:, 0],
-                        embedding[:, 1],
-                        c=colors)
-                    if wandb_log:
-                        logs[f"val/umap"] = wandb.Image(fig, caption=f"epoch{epoch:03d}")
-                        plt.close()
-                    else:
-                        plt.savefig(os.path.join(outdir, f'umap-val-epoch{epoch:03d}.png'))
-                        plt.show()
-                
         if wandb_log: wandb.log(logs)
+    else:
+        print(f"\n{local_rank} waiting")
         
     # wait for other GPUs to catch up if needed
     accelerator.wait_for_everyone()
 
 print("\n===Finished!===\n")
+save_ckpt(f'last')
 if not utils.is_interactive():
     sys.exit(0)
 
