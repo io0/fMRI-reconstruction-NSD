@@ -256,29 +256,29 @@ def get_dataloaders(
         test_url = list(braceexpand.braceexpand(test_url))
         
         from tqdm import tqdm
-        for url in tqdm(train_url):
-            destination = cache_dir + "/" + url.rsplit('/', 1)[-1]
-            print(f"\nDownloading {url} to {destination}...")
-            response = requests.get(url)
-            response.raise_for_status()
-            with open(destination, 'wb') as file:
-                file.write(response.content)
+        # for url in tqdm(train_url):
+        #     destination = cache_dir + "/" + url.rsplit('/', 1)[-1]
+        #     print(f"\nDownloading {url} to {destination}...")
+        #     response = requests.get(url)
+        #     response.raise_for_status()
+        #     with open(destination, 'wb') as file:
+        #         file.write(response.content)
                 
-        for url in tqdm(val_url):
-            destination = cache_dir + "/" + url.rsplit('/', 1)[-1]
-            print(f"\nDownloading {url} to {destination}...")
-            response = requests.get(url)
-            response.raise_for_status()
-            with open(destination, 'wb') as file:
-                file.write(response.content)
+        # for url in tqdm(val_url):
+        #     destination = cache_dir + "/" + url.rsplit('/', 1)[-1]
+        #     print(f"\nDownloading {url} to {destination}...")
+        #     response = requests.get(url)
+        #     response.raise_for_status()
+        #     with open(destination, 'wb') as file:
+        #         file.write(response.content)
                 
-        for url in tqdm(test_url):
-            destination = cache_dir + "/" + url.rsplit('/', 1)[-1]
-            print(f"\nDownloading {url} to {destination}...")
-            response = requests.get(url)
-            response.raise_for_status()
-            with open(destination, 'wb') as file:
-                file.write(response.content)
+        # for url in tqdm(test_url):
+        #     destination = cache_dir + "/" + url.rsplit('/', 1)[-1]
+        #     print(f"\nDownloading {url} to {destination}...")
+        #     response = requests.get(url)
+        #     response.raise_for_status()
+        #     with open(destination, 'wb') as file:
+        #         file.write(response.content)
 
     if num_devices is None:
         num_devices = torch.cuda.device_count()
@@ -337,7 +337,7 @@ def get_dataloaders(
     
     val_dl = torch.utils.data.DataLoader(val_data, batch_size=None, num_workers=1, shuffle=False)
 
-    return train_dl, val_dl, num_train, num_val
+    return train_dl, val_dl, num_train, num_val, "hi"
 
 def cosine_anneal(start, end, steps):
     return end + (start - end)/2 * (1 + torch.cos(torch.pi*torch.arange(steps)/(steps-1)))
