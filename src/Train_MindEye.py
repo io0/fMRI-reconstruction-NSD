@@ -181,8 +181,8 @@ num_epochs *= accelerator.num_processes
 # In[32]:
 
 
-model_name = "new_1cm_2gpu_again"
-n_samples_save = 1
+model_name = "1cm_fnirs_env_v2"
+n_samples_save = 0
 
 
 
@@ -220,7 +220,7 @@ num_train = 8559 + 300
 num_val = 982
 
 print('Prepping train and validation dataloaders...')
-train_dl, val_dl, num_train, num_val, _= utils.get_dataloaders(
+train_dl, val_dl, num_train, num_val = utils.get_dataloaders(
     batch_size,'images',
     num_devices=num_devices,
     num_workers=num_workers,
